@@ -1,9 +1,10 @@
 <!DOCTYPE html>
-<!-- NSE Stock Screener Cloud Production V44: retention, session security, cloud export, admin-only downloads -->
+<!-- NSE Stock Screener Cloud Production V44.3: retention, session security, account-security protections, admin-only downloads -->
 <html lang="en">
 <head>
 <!-- V37 cloud/local cache-consistency hotfix. -->
 <!-- V44 feature layer -->
+<!-- V44.3 account-security layer: server-side login lockout, admin security answer, admin user creation -->
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>NSE Stock Screener — Cloud Production</title>
@@ -463,6 +464,13 @@ body.cloud-cache-loading #sidebar-backdrop{pointer-events:none}
       <div id="auth-error" class="auth-error"></div>
       <button id="btn-auth-login" class="btn primary" type="submit">Sign in</button>
     </form>
+    <div id="auth-security-challenge" style="display:none;margin-top:12px;padding-top:12px;border-top:1px solid var(--line);text-align:left">
+      <div style="font-weight:600;margin-bottom:5px">Additional administrator verification</div>
+      <div style="font-size:.78rem;color:var(--muted);line-height:1.45;margin-bottom:10px">Security question: What is your administrator security answer?</div>
+      <label class="auth-field"><span>Security answer</span><input id="auth-security-answer" type="password" autocomplete="current-password" maxlength="256"></label>
+      <button id="btn-auth-security-answer" class="btn small primary" type="button">Verify security answer</button>
+      <div id="auth-security-status" style="margin-top:8px;font-size:.78rem"></div>
+    </div>
     <div class="auth-meta">Access is controlled by your account permissions.</div>
   </div>
 </div>
@@ -2114,6 +2122,73 @@ function authSetError(message) {
   el.style.display = message ? 'block' : 'none';
 }
 
+let AUTH_SECURITY_CHALLENGE_TOKEN = null;
+
+function authSecurityStatus(message, isError = false) {
+  const el = document.getElementById('auth-security-status');
+  if (!el) return;
+  el.textContent = message || '';
+  el.style.color = isError ? 'var(--wrong)' : 'var(--muted)';
+}
+
+function clearAuthSecurityChallenge() {
+  AUTH_SECURITY_CHALLENGE_TOKEN = null;
+  const panel = document.getElementById('auth-security-challenge');
+  const answer = document.getElementById('auth-security-answer');
+  if (panel) panel.style.display = 'none';
+  if (answer) answer.value = '';
+  authSecurityStatus('');
+}
+
+function showAuthSecurityChallenge(token) {
+  AUTH_SECURITY_CHALLENGE_TOKEN = token || null;
+  const panel = document.getElementById('auth-security-challenge');
+  if (panel) panel.style.display = AUTH_SECURITY_CHALLENGE_TOKEN ? 'block' : 'none';
+  const answer = document.getElementById('auth-security-answer');
+  if (answer) { answer.value = ''; answer.focus(); }
+  authSecurityStatus('');
+}
+
+async function callPublicSecurityFunction(functionName, payload) {
+  const response = await fetch(`${APP_API_ORIGIN}/functions/v1/${encodeURIComponent(functionName)}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'apikey': APP_PUBLIC_CLIENT_KEY },
+    body: JSON.stringify(payload || {}),
+    cache: 'no-store',
+  });
+  let data = {};
+  try { data = await response.json(); } catch (_) {}
+  if (!response.ok) {
+    const error = new Error(data?.error || 'Request failed.');
+    error.status = response.status;
+    error.payload = data;
+    throw error;
+  }
+  return data;
+}
+
+async function verifyAdminSecurityAnswer() {
+  const email = document.getElementById('auth-email')?.value.trim().toLowerCase() || '';
+  const answer = document.getElementById('auth-security-answer')?.value || '';
+  const button = document.getElementById('btn-auth-security-answer');
+  if (!AUTH_SECURITY_CHALLENGE_TOKEN || !answer) { authSecurityStatus('Enter the security answer.', true); return; }
+  if (button) { button.disabled = true; button.textContent = 'Verifying…'; }
+  try {
+    const data = await callPublicSecurityFunction('nse-auth-gateway', {
+      action: 'unlock_admin', email, challenge_token: AUTH_SECURITY_CHALLENGE_TOKEN, answer,
+    });
+    clearAuthSecurityChallenge();
+    authSetError(data?.message || 'Verification accepted. Please sign in again.');
+    const password = document.getElementById('auth-password');
+    if (password) { password.value = ''; password.focus(); }
+  } catch (e) {
+    console.error('Administrator security verification failed:', e);
+    authSecurityStatus(e?.message || 'Security verification failed.', true);
+  } finally {
+    if (button) { button.disabled = false; button.textContent = 'Verify security answer'; }
+  }
+}
+
 function clearLoginFormCredentials() {
   const form = document.getElementById('auth-form');
   const emailInput = document.getElementById('auth-email');
@@ -2129,6 +2204,7 @@ function clearLoginFormCredentials() {
   // autofill prompt, which is controlled by the browser rather than the app.
   if (emailInput) emailInput.value = '';
   if (passwordInput) passwordInput.value = '';
+  clearAuthSecurityChallenge();
 }
 
 function showAuthScreen() {
@@ -4033,6 +4109,18 @@ function escapeHtml(s) {
   }[c]));
 }
 
+function escapeInlineJs(value) {
+  return escapeHtml(
+    String(value)
+      .replace(/\\/g, '\\\\')
+      .replace(/'/g, "\\'")
+      .replace(/\r/g, '\\r')
+      .replace(/\n/g, '\\n')
+      .replace(/\u2028/g, '\\u2028')
+      .replace(/\u2029/g, '\\u2029')
+  );
+}
+
 function foAvailableCell(isAvailable) {
   return `<td><span class="flag" style="background:${isAvailable ? 'rgba(47,122,79,.15)' : 'rgba(122,115,100,.15)'};color:${isAvailable ? 'var(--correct)' : 'var(--muted)'}">${isAvailable ? 'Yes' : 'No'}</span></td>`;
 }
@@ -4339,7 +4427,7 @@ async function onToggleWatchlistClick(symbol) {
 }
 function starHtml(symbol, watchlistSet) {
   const starred = watchlistSet.has(symbol);
-  return `<span onclick="event.stopPropagation(); onToggleWatchlistClick('${escapeHtml(symbol)}')" style="cursor:pointer;color:${starred ? 'var(--brass)' : 'var(--muted)'}" title="${starred ? 'Remove from' : 'Add to'} watchlist">${starred ? '★' : '☆'}</span>`;
+  return `<span onclick="event.stopPropagation(); onToggleWatchlistClick('${escapeInlineJs(symbol)}')" style="cursor:pointer;color:${starred ? 'var(--brass)' : 'var(--muted)'}" title="${starred ? 'Remove from' : 'Add to'} watchlist">${starred ? '★' : '☆'}</span>`;
 }
 /* =========================================================================
    Part 5b: Sidebar + router
@@ -5526,7 +5614,7 @@ async function renderDashboardPage() {
       <div class="panel" style="border-color:${watchlistHits.length ? 'var(--correct)' : 'var(--line)'}">
         <strong>★ Watchlist (${watchlist.size} stocks):</strong>
         ${watchlistHits.length
-          ? `${watchlistHits.length} crossed score ≥ 70 today — ${watchlistHits.map(r => `<a onclick="openDrilldown('${escapeHtml(r.symbol)}')" style="cursor:pointer">${escapeHtml(r.symbol)}</a> (${fmtNum(r.score,1)})`).join(', ')}`
+          ? `${watchlistHits.length} crossed score ≥ 70 today — ${watchlistHits.map(r => `<a onclick="openDrilldown('${escapeInlineJs(r.symbol)}')" style="cursor:pointer">${escapeHtml(r.symbol)}</a> (${fmtNum(r.score,1)})`).join(', ')}`
           : `none crossed score ≥ 70 today.`}
         <a onclick="showPage('scoreboard')" style="cursor:pointer;font-size:.8rem;margin-left:8px">View all →</a>
       </div>` : ''}
@@ -5586,7 +5674,7 @@ async function renderDashboardPage() {
         <div class="panel-title"><h3>Nearest to 52-week low</h3><a onclick="showPage('low52')" style="cursor:pointer;font-size:.75rem">Full screener →</a></div>
         <div class="table-wrap"><table><thead><tr><th>Symbol</th><th>Close</th><th>Chg %</th><th>% above 52w low</th><th>Score</th></tr></thead>
         <tbody>${board.filter(r => r.pct_from_52wk_low !== null).sort((a, b) => a.pct_from_52wk_low - b.pct_from_52wk_low).slice(0, 10)
-          .map(r => `<tr><td class="sym" onclick="openDrilldown('${escapeHtml(r.symbol)}')">${escapeHtml(r.symbol)}</td><td>${fmtNum(r.close)}</td><td>${priceChgHtml(r.price_chg_pct)}</td><td>${fmtPct(r.pct_from_52wk_low * 100)}</td><td>${r.score !== null ? fmtNum(r.score, 1) : '—'}</td></tr>`).join('')}
+          .map(r => `<tr><td class="sym" onclick="openDrilldown('${escapeInlineJs(r.symbol)}')">${escapeHtml(r.symbol)}</td><td>${fmtNum(r.close)}</td><td>${priceChgHtml(r.price_chg_pct)}</td><td>${fmtPct(r.pct_from_52wk_low * 100)}</td><td>${r.score !== null ? fmtNum(r.score, 1) : '—'}</td></tr>`).join('')}
         </tbody></table></div>
       </div>
     `;
@@ -5961,7 +6049,7 @@ function refreshCashResults() {
     const pctBelowHigh = (r.adj_52w_high && r.close !== null) ? (r.adj_52w_high - r.close) / r.adj_52w_high : null;
     return `
     <tr>
-      <td class="sym" onclick="openDrilldown('${escapeHtml(r.symbol)}')">${escapeHtml(r.symbol)}${_companyNamesCache[r.symbol] ? `<div style="font-size:.68rem;color:var(--muted);font-weight:400">${escapeHtml(_companyNamesCache[r.symbol])}</div>` : ''}</td>
+      <td class="sym" onclick="openDrilldown('${escapeInlineJs(r.symbol)}')">${escapeHtml(r.symbol)}${_companyNamesCache[r.symbol] ? `<div style="font-size:.68rem;color:var(--muted);font-weight:400">${escapeHtml(_companyNamesCache[r.symbol])}</div>` : ''}</td>
       <td>${r.date}</td><td>${fmtNum(r.close)}</td>
       <td>${chg ? priceChgHtml(chg.chgPct) : '—'}</td>
       <td>${fmtNum(r.volume, 0)}</td>
@@ -6035,7 +6123,7 @@ function refreshFoResults() {
     const chg = _foOiChgLookup.get(r.id);
     return `
     <tr>
-      <td class="sym" onclick="openDrilldown('${escapeHtml(r.symbol)}')">${escapeHtml(r.symbol)}</td>
+      <td class="sym" onclick="openDrilldown('${escapeInlineJs(r.symbol)}')">${escapeHtml(r.symbol)}</td>
       <td>${r.date}</td><td>${fmtNum(r.oi, 0)}</td>
       <td>${chg ? priceChgHtml(chg.chgPct) : '—'}</td>
       <td>${r.pcr !== null && r.pcr !== undefined ? fmtNum(r.pcr, 2) : '—'}</td>
@@ -6144,7 +6232,7 @@ function refreshScoreResults() {
       <td>${r.score !== null ? `<span class="score-bar"><span style="width:${Math.min(100, r.score)}%"></span></span>${fmtNum(r.score, 1)}` : '—'}</td>
       <td>${streak >= 2 ? `<span class="flag buildup">${streak}d ≥70</span>` : '—'}</td>
       <td>${r.setup_tag === 'Accumulation Setup' ? badgeHtml('accumulation') : r.setup_tag === 'Distribution Warning' ? badgeHtml('distribution') : '—'}</td>
-      <td class="sym" onclick="openDrilldown('${escapeHtml(r.symbol)}')">${escapeHtml(r.symbol)}${_companyNamesCache[r.symbol] ? `<div style="font-size:.68rem;color:var(--muted);font-weight:400">${escapeHtml(_companyNamesCache[r.symbol])}</div>` : ''}</td>
+      <td class="sym" onclick="openDrilldown('${escapeInlineJs(r.symbol)}')">${escapeHtml(r.symbol)}${_companyNamesCache[r.symbol] ? `<div style="font-size:.68rem;color:var(--muted);font-weight:400">${escapeHtml(_companyNamesCache[r.symbol])}</div>` : ''}</td>
       <td>${priceChgHtml(r.price_chg_pct)}</td>
       <td>${r.deliv_percentile !== null ? fmtPct(r.deliv_percentile) : '—'}</td>
       <td>${r.pct_from_52wk_low !== null && r.pct_from_52wk_low !== undefined ? fmtPct(r.pct_from_52wk_low * 100) : '—'}</td>
@@ -6235,7 +6323,7 @@ function refreshOiResults() {
   document.getElementById('tbody-oi').innerHTML = board.map(r => `
     <tr>
       <td>${cmpAddButtonHtml(r.symbol)}${oa2PoolAddButtonHtml(r.symbol, 'OI Buildup', r.oi_class, '—', '—')}</td>
-      <td class="sym" onclick="openDrilldown('${escapeHtml(r.symbol)}')">${escapeHtml(r.symbol)}</td>
+      <td class="sym" onclick="openDrilldown('${escapeInlineJs(r.symbol)}')">${escapeHtml(r.symbol)}</td>
       <td>${fmtNum(r.close)}</td><td>${priceChgHtml(r.price_chg_pct)}</td>
       <td>${fmtNum(r.oi, 0)}</td><td>${priceChgHtml(r.oi_chg_pct)}</td>
       <td>${oiClassBadge(r.oi_class)}</td>
@@ -6419,7 +6507,7 @@ async function refreshEventsResults() {
       <td>${oa2PoolAddButtonHtml(e.symbol, 'Event Calendar', e.purpose, '—', '—')}</td>
       <td>${e.date}</td>
       <td>${daysAway === null ? '—' : (daysAway < 0 ? `${Math.abs(daysAway)}d ago` : daysAway === 0 ? 'Today' : `in ${daysAway}d`)}</td>
-      <td class="sym" onclick="openSymbolEvents('${escapeHtml(e.symbol)}')">${escapeHtml(e.symbol)}</td>
+      <td class="sym" onclick="openSymbolEvents('${escapeInlineJs(e.symbol)}')">${escapeHtml(e.symbol)}</td>
       <td>${escapeHtml(e.company || '—')}</td>
       <td>${escapeHtml(e.purpose || '—')}</td>
       <td style="max-width:340px;white-space:normal" title="${escapeHtml(e.details || '')}">${escapeHtml((e.details || '').length > 120 ? e.details.slice(0, 120) + '…' : (e.details || '—'))}</td>
@@ -6459,7 +6547,7 @@ function refreshDelivResults() {
   _lastFilteredRows.deliv = rows;
   document.getElementById('tbody-deliv').innerHTML = rows.map(r => `
     <tr>
-      <td class="sym" onclick="openDrilldown('${escapeHtml(r.symbol)}')">${escapeHtml(r.symbol)}</td>
+      <td class="sym" onclick="openDrilldown('${escapeInlineJs(r.symbol)}')">${escapeHtml(r.symbol)}</td>
       <td>${fmtNum(r.close)}</td><td>${priceChgHtml(r.price_chg_pct)}</td><td>${fmtPct(r.deliv_per)}</td>
       <td>${r.deliv_percentile !== null ? fmtPct(r.deliv_percentile) : '—'}</td>
       <td>${r.deliv_zscore !== null ? fmtNum(r.deliv_zscore, 2) : '—'}</td>
@@ -6720,7 +6808,7 @@ function refreshLow52Results() {
     <tr>
       <td>${oa2PoolAddButtonHtml(r.symbol, '52-Week Low Screener', r.oi_class, '—', '—')}</td>
       <td>${fmtPct(r.pct_from_52wk_low * 100)}</td>
-      <td class="sym" onclick="openDrilldown('${escapeHtml(r.symbol)}')">${escapeHtml(r.symbol)}</td>
+      <td class="sym" onclick="openDrilldown('${escapeInlineJs(r.symbol)}')">${escapeHtml(r.symbol)}</td>
       <td>${fmtNum(r.close)}</td><td>${priceChgHtml(r.price_chg_pct)}</td><td>${fmtPct(r.deliv_per)}</td>
       <td>${r.score !== null ? fmtNum(r.score, 1) : '—'}</td>
       <td>${oiClassBadge(r.oi_class)}</td>
@@ -7221,7 +7309,7 @@ async function renderRadarPage() {
           <tbody>${top.map(r => `
             <tr>
               <td>${cmpAddButtonHtml(r.symbol)}${oa2PoolAddButtonHtml(r.symbol, 'Daily Radar', '—', '—', '—')}</td>
-              <td class="sym" onclick="openDrilldown('${escapeHtml(r.symbol)}')">${escapeHtml(r.symbol)}${companyNames[r.symbol] ? `<div style="font-size:.68rem;color:var(--muted);font-weight:400">${escapeHtml(companyNames[r.symbol])}</div>` : ''}</td>
+              <td class="sym" onclick="openDrilldown('${escapeInlineJs(r.symbol)}')">${escapeHtml(r.symbol)}${companyNames[r.symbol] ? `<div style="font-size:.68rem;color:var(--muted);font-weight:400">${escapeHtml(companyNames[r.symbol])}</div>` : ''}</td>
               <td>${metricValue(metricType, r)}</td>
               <td>${r.score !== null ? fmtNum(r.score, 1) : '—'}</td>
               <td>${rowBadgesHtml(r)}</td>
@@ -7412,7 +7500,7 @@ function refreshVolumeSurgeResults() {
     <tr>
       <td>${cmpAddButtonHtml(r.symbol)}${oa2PoolAddButtonHtml(r.symbol, 'Volume Surge', '—', '—', '—')}</td>
       <td><span class="score-bar"><span style="width:${Math.min(100, r.multiplier * 10)}%"></span></span>${fmtNum(r.multiplier, 1)}×</td>
-      <td class="sym" onclick="openDrilldown('${escapeHtml(r.symbol)}')">${escapeHtml(r.symbol)}${_vsCompanyNames[r.symbol] ? `<div style="font-size:.68rem;color:var(--muted);font-weight:400">${escapeHtml(_vsCompanyNames[r.symbol])}</div>` : ''}</td>
+      <td class="sym" onclick="openDrilldown('${escapeInlineJs(r.symbol)}')">${escapeHtml(r.symbol)}${_vsCompanyNames[r.symbol] ? `<div style="font-size:.68rem;color:var(--muted);font-weight:400">${escapeHtml(_vsCompanyNames[r.symbol])}</div>` : ''}</td>
       ${STATE.filters.volSurge.mode === 'range' ? `<td>${r.date}</td>` : ''}
       <td>${fmtNum(r.close)}</td>
       <td>${priceChgHtml(r.priceChgPct)}</td>
@@ -7687,7 +7775,7 @@ function refreshStockScannerResults() {
     <tr>
       <td>${cmpAddButtonHtml(r.symbol)}${oa2PoolAddButtonHtml(r.symbol, 'Stock Scanner', '—', '—', '—')}</td>
       <td><span class="score-bar"><span style="width:${Math.min(100, (r.volMetric / 3) * 100)}%"></span></span>${fmtNum(r.volMetric, 2)}\u00d7</td>
-      <td class="sym" onclick="openScannerStockDetail('${escapeHtml(r.symbol)}')">${escapeHtml(r.symbol)}${_scannerCompanyNames[r.symbol] ? `<div style="font-size:.68rem;color:var(--muted);font-weight:400">${escapeHtml(_scannerCompanyNames[r.symbol])}</div>` : ''}</td>
+      <td class="sym" onclick="openScannerStockDetail('${escapeInlineJs(r.symbol)}')">${escapeHtml(r.symbol)}${_scannerCompanyNames[r.symbol] ? `<div style="font-size:.68rem;color:var(--muted);font-weight:400">${escapeHtml(_scannerCompanyNames[r.symbol])}</div>` : ''}</td>
       ${filt.mode === 'range' ? `<td>${r.date}</td>` : ''}
       <td>${fmtNum(r.close)}</td>
       <td>${fmtNum(r.refLevel)}</td>
@@ -8335,7 +8423,7 @@ function watchlistRowHtml(tab, r) {
       <td>${cmpAddButtonHtml(r.symbol)}${oa2PoolAddButtonHtml(r.symbol, 'Watchlists (Concentration)', '—', '—', '—')}</td>
       <td>${fmtPct(r.concentration_max_pct)}</td>
       <td>${fmtNum(r.concentration_count, 0)}</td>
-      <td class="sym" onclick="openDrilldown('${escapeHtml(r.symbol)}')">${escapeHtml(r.symbol)}</td>
+      <td class="sym" onclick="openDrilldown('${escapeInlineJs(r.symbol)}')">${escapeHtml(r.symbol)}</td>
       <td>${fmtNum(r.close)}</td>
       <td>${fmtNum(r.oi, 0)}</td>
       <td>${r.date}</td>
@@ -8346,7 +8434,7 @@ function watchlistRowHtml(tab, r) {
     return `<tr>
       <td>${cmpAddButtonHtml(r.symbol)}${oa2PoolAddButtonHtml(r.symbol, 'Watchlists (Near Ban)', '—', '—', '—')}</td>
       <td><span class="score-bar"><span style="width:${Math.min(100, r.utilizationPct)}%"></span></span>${fmtPct(r.utilizationPct)}</td>
-      <td class="sym" onclick="openDrilldown('${escapeHtml(r.symbol)}')">${escapeHtml(r.symbol)}</td>
+      <td class="sym" onclick="openDrilldown('${escapeInlineJs(r.symbol)}')">${escapeHtml(r.symbol)}</td>
       <td>${fmtNum(r.close)}</td>
       <td>${fmtNum(r.future_equiv_oi, 0)}</td>
       <td>${fmtNum(r.mwpl, 0)}</td>
@@ -8356,7 +8444,7 @@ function watchlistRowHtml(tab, r) {
   return `<tr>
     <td>${cmpAddButtonHtml(r.symbol)}${oa2PoolAddButtonHtml(r.symbol, 'Watchlists (Near Circuit)', '—', '—', '—')}</td>
     <td>${fmtPct(r.distPct)}</td>
-    <td class="sym" onclick="openDrilldown('${escapeHtml(r.symbol)}')">${escapeHtml(r.symbol)}</td>
+    <td class="sym" onclick="openDrilldown('${escapeInlineJs(r.symbol)}')">${escapeHtml(r.symbol)}</td>
     <td>${fmtNum(r.close)}</td>
     <td>${fmtNum(r.lower_band)}</td>
     <td>${fmtNum(r.upper_band)}</td>
@@ -8476,7 +8564,7 @@ function activityRowHtml(tab, r) {
   if (tab === 'deals') {
     return `<tr>
       <td>${fmtNum(r.value, 0)}</td>
-      <td class="sym" onclick="openDrilldown('${escapeHtml(r.symbol)}')">${escapeHtml(r.symbol)}</td>
+      <td class="sym" onclick="openDrilldown('${escapeInlineJs(r.symbol)}')">${escapeHtml(r.symbol)}</td>
       <td>${r.date}</td>
       <td>${r.type}</td>
       <td style="font-family:var(--font-sans)">${escapeHtml(r.client || '—')}</td>
@@ -8488,7 +8576,7 @@ function activityRowHtml(tab, r) {
   }
   return `<tr>
     <td>${fmtNum(r.short_sell_qty, 0)}</td>
-    <td class="sym" onclick="openDrilldown('${escapeHtml(r.symbol)}')">${escapeHtml(r.symbol)}</td>
+    <td class="sym" onclick="openDrilldown('${escapeInlineJs(r.symbol)}')">${escapeHtml(r.symbol)}</td>
     <td>${fmtNum(r.close)}</td>
     <td>${r.date}</td>
     ${foAvailableCell(r.foAvailable)}
@@ -8942,14 +9030,14 @@ function refreshCocResults() {
   document.getElementById('tbody-coc').innerHTML = rows.map(r => `
     <tr>
       <td class="${r.basisPct > 0 ? 'text-good' : r.basisPct < 0 ? 'text-bad' : ''}">${fmtSigned(r.basisPct, 2, '%')}</td>
-      <td class="sym" onclick="openDrilldown('${escapeHtml(r.symbol)}')">${escapeHtml(r.symbol)}</td>
+      <td class="sym" onclick="openDrilldown('${escapeInlineJs(r.symbol)}')">${escapeHtml(r.symbol)}</td>
       <td>${fmtNum(r.close)}</td>
       <td>${fmtNum(r.settle_price)}</td>
       <td>${fmtSigned(r.basis, 2)}</td>
       <td>${(r.rollover_pct !== null && r.rollover_pct !== undefined) ? fmtPct(r.rollover_pct) : '—'}</td>
       <td>${r.date}</td>
       ${foAvailableCell(true)}
-      <td><button class="btn small" onclick="openCocStockAnalysis('${escapeHtml(r.symbol)}')">📊 Analyze</button></td>
+      <td><button class="btn small" onclick="openCocStockAnalysis('${escapeInlineJs(r.symbol)}')">📊 Analyze</button></td>
     </tr>`).join('') || `<tr><td colspan="9" style="color:var(--muted)">No F&amp;O basis data for this date.</td></tr>`;
 }
 
@@ -9845,7 +9933,7 @@ function cmpAddButtonHtml(symbol) {
   const added = cmpIsAdded(symbol);
   return `<button type="button" class="btn small cmp-add-btn" data-symbol="${escapeHtml(symbol)}"
     title="${added ? 'Added to Multi-Stock Comparison' : 'Add to Multi-Stock Comparison'}"
-    onclick="event.stopPropagation();cmpQuickAdd('${escapeHtml(symbol)}')" ${added ? 'disabled' : ''}
+    onclick="event.stopPropagation();cmpQuickAdd('${escapeInlineJs(symbol)}')" ${added ? 'disabled' : ''}
     style="padding:1px 8px;line-height:1.3;min-width:26px">${added ? '✓' : '+'}</button>`;
 }
 
@@ -9895,7 +9983,7 @@ function oa2PoolAddButtonHtml(symbol, screen, direction, lean, stage) {
   const already = _oa2Pool.some(p => p.symbol === symbol && p.screen === screen);
   return `<button type="button" class="btn small oa2-pool-btn" data-symbol="${escapeHtml(symbol)}" data-screen="${escapeHtml(screen || '')}"
     title="${already ? 'Added to Options Analysis dropdown' : 'Add to Options Analysis → Opportunities dropdown'}"
-    onclick="event.stopPropagation();oa2PoolAdd('${escapeHtml(symbol)}','${escapeHtml(screen || '')}','${escapeHtml(direction || '')}','${escapeHtml(lean || '')}','${escapeHtml(stage || '')}')" ${already ? 'disabled' : ''}
+    onclick="event.stopPropagation();oa2PoolAdd('${escapeInlineJs(symbol)}','${escapeInlineJs(screen || '')}','${escapeInlineJs(direction || '')}','${escapeInlineJs(lean || '')}','${escapeInlineJs(stage || '')}')" ${already ? 'disabled' : ''}
     style="padding:1px 6px;line-height:1.3;min-width:24px">${already ? '✓' : '📌'}</button>`;
 }
 
@@ -9999,7 +10087,7 @@ function renderCmpResults() {
           ${rows.map(r => `
             <tr>
               <td class="cmp-sym-col">${escapeHtml(r.symbol)}${r.companyName ? `<div style="font-size:.68rem;color:var(--muted);font-weight:400">${escapeHtml(r.companyName)}</div>` : ''}
-                <button class="btn small no-print" style="margin-top:4px;padding:1px 6px" onclick="cmpRemoveBySymbol('${escapeHtml(r.symbol)}')">🗑</button></td>
+                <button class="btn small no-print" style="margin-top:4px;padding:1px 6px" onclick="cmpRemoveBySymbol('${escapeInlineJs(r.symbol)}')">🗑</button></td>
               ${visibleMetrics.map(m => {
                 const b = bw.get(m.key);
                 const cls = b.best.has(r.symbol) ? 'cmp-best' : b.worst.has(r.symbol) ? 'cmp-worst' : '';
@@ -10470,9 +10558,9 @@ function renderSmartResults() {
             <tr>
               <td><input type="checkbox" class="smart-select-chk" data-symbol="${escapeHtml(r.symbol)}" data-direction="${escapeHtml(r.direction || '—')}" data-lean="—" data-stage="${escapeHtml(r.stage || '—')}"></td>
               <td>${cmpAddButtonHtml(r.symbol)}</td>
-              <td><a onclick="document.getElementById('smart-card-${escapeHtml(r.symbol)}').scrollIntoView({behavior:'smooth'})" style="cursor:pointer;font-weight:600">${fmtNum(r.composite, 1)}</a></td>
+              <td><a onclick="document.getElementById('smart-card-${escapeInlineJs(r.symbol)}').scrollIntoView({behavior:'smooth'})" style="cursor:pointer;font-weight:600">${fmtNum(r.composite, 1)}</a></td>
               ${filt.from ? `<td>${r.scoreTrend !== null && r.scoreTrend !== undefined ? (r.scoreTrend > 0 ? `🟢 +${fmtNum(r.scoreTrend, 1)}` : r.scoreTrend < 0 ? `🔴 ${fmtNum(r.scoreTrend, 1)}` : '⚪ 0.0') : '—'}</td>` : ''}
-              <td class="sym" onclick="openStockAnalysis('${escapeHtml(r.symbol)}','${r.date}')">${escapeHtml(r.symbol)}${r.companyName ? `<div style="font-size:.68rem;color:var(--muted);font-weight:400">${escapeHtml(r.companyName)}</div>` : ''}</td>
+              <td class="sym" onclick="openStockAnalysis('${escapeInlineJs(r.symbol)}','${escapeInlineJs(r.date)}')">${escapeHtml(r.symbol)}${r.companyName ? `<div style="font-size:.68rem;color:var(--muted);font-weight:400">${escapeHtml(r.companyName)}</div>` : ''}</td>
               <td>${smartStageEmoji(r.stage)} ${r.stage}</td>
               <td>${smartDirectionEmoji(r.direction)} ${r.direction}</td>
               <td>${r.screenCount}/${SMART_RULES.totalScreensChecked}</td>
@@ -10544,7 +10632,7 @@ function renderSmartCard(r, rank) {
         <tbody>${r.parts.map(p => `<tr><td>${p.label}</td><td>${escapeHtml(p.detail)}</td><td>${fmtNum(p.score, 0)}/100</td><td>${Math.round(p.weight * 100)}%</td></tr>`).join('')}</tbody>
       </table></div>
       <p style="font-size:.72rem;color:var(--muted);margin-top:8px">
-        <a onclick="openStockAnalysis('${escapeHtml(r.symbol)}','${r.date}')" style="cursor:pointer">Open full Single Stock analysis →</a>
+        <a onclick="openStockAnalysis('${escapeInlineJs(r.symbol)}','${escapeInlineJs(r.date)}')" style="cursor:pointer">Open full Single Stock analysis →</a>
       </p>
     </div>`;
 }
@@ -11019,7 +11107,7 @@ function refreshSmartSelectResultsS() {
               <td>${ssIndicatorS(r)}</td>
               <td><strong>${r.score}</strong></td>
               <td class="sym">
-                <span style="cursor:pointer" onclick="openStockAnalysis('${escapeHtml(r.symbol)}','${escapeHtml(_smartCacheS.asOfDate)}')">${escapeHtml(r.symbol)}</span>
+                <span style="cursor:pointer" onclick="openStockAnalysis('${escapeInlineJs(r.symbol)}','${escapeInlineJs(_smartCacheS.asOfDate)}')">${escapeHtml(r.symbol)}</span>
                 ${cmpAddButtonHtml(r.symbol)}
               </td>
               <td>${ssDirBadgeS(r.direction)}</td>
@@ -11559,7 +11647,7 @@ function smartExplainHtmlL(r) {
         ${r.falsePositiveFlags.length ? `<p style="font-size:.8rem;font-weight:600;margin:6px 0 2px 0;color:var(--warn)">Caution flags</p><ul style="font-size:.78rem;margin:0 0 8px 18px;padding:0;color:var(--warn)">${r.falsePositiveFlags.map(f => `<li>${escapeHtml(f)}</li>`).join('')}</ul>` : ''}
         <p style="font-size:.8rem;font-weight:600;margin:6px 0 2px 0">What to monitor next</p>
         <ul style="font-size:.78rem;margin:0 0 4px 18px;padding:0">${monitor.map(m => `<li>${escapeHtml(m)}</li>`).join('')}</ul>
-        <button class="btn small" onclick="openStockAnalysis('${escapeHtml(r.symbol)}','${r.date}')">📊 Full Stock Analysis →</button>
+        <button class="btn small" onclick="openStockAnalysis('${escapeInlineJs(r.symbol)}','${escapeInlineJs(r.date)}')">📊 Full Stock Analysis →</button>
       </div>
     </td></tr>`;
 }
@@ -11592,7 +11680,7 @@ function renderSmartSelectTableL() {
       </tr></thead>
       <tbody>
         ${rows.map(r => `
-          <tr style="cursor:pointer" onclick="toggleSmartExplainL('${escapeHtml(r.symbol)}')">
+          <tr style="cursor:pointer" onclick="toggleSmartExplainL('${escapeInlineJs(r.symbol)}')">
             <td onclick="event.stopPropagation()"><input type="checkbox" class="smart-select-chk-l" data-symbol="${escapeHtml(r.symbol)}" data-direction="${escapeHtml(r.overallLean || '—')}" data-lean="${escapeHtml(r.overallLean || '—')}" data-stage="${escapeHtml(r.stage || '—')}"></td>
             <td><span class="score-bar"><span style="width:${Math.max(0, Math.min(100, r.score))}%"></span></span>${fmtNum(r.score, 1)}</td>
             <td>${leanEmojiL(r.overallLean)} ${r.overallLean}</td>
@@ -11940,9 +12028,9 @@ function renderPfOpenTab() {
           <td class="${r.unrealizedPL > 0 ? 'text-good' : r.unrealizedPL < 0 ? 'text-bad' : ''}">${r.unrealizedPL !== null ? fmtSigned(r.unrealizedPL, 2) : '\u2014'}</td>
           <td class="${r.unrealizedPLPct > 0 ? 'text-good' : r.unrealizedPLPct < 0 ? 'text-bad' : ''}">${r.unrealizedPLPct !== null ? fmtSigned(r.unrealizedPLPct, 2, '%') : '\u2014'}</td>
           <td>
-            <button class="btn small" onclick="openSellModal('${r.id}')">Sell</button>
-            <button class="btn small" onclick="openEditTradeModal('${r.id}')">Edit</button>
-            <button class="btn small" onclick="deleteTradeConfirm('${r.id}')">Delete</button>
+            <button class="btn small" onclick="openSellModal('${escapeInlineJs(r.id)}')">Sell</button>
+            <button class="btn small" onclick="openEditTradeModal('${escapeInlineJs(r.id)}')">Edit</button>
+            <button class="btn small" onclick="deleteTradeConfirm('${escapeInlineJs(r.id)}')">Delete</button>
           </td>
         </tr>`).join('') || '<tr><td colspan="9" style="color:var(--muted)">No open positions match these filters.</td></tr>'}
       </tbody>
@@ -12084,12 +12172,12 @@ function openSellModal(tradeId) {
     <p style="color:var(--muted);font-size:.8rem;margin-top:-8px">Buy: ${t.buyDate} @ ${fmtNum(t.buyPrice)} \u00b7 Qty remaining: ${fmtNum(qtyRem, 0)}</p>
     <div class="grid grid-2">
       <label>Sell Date<input type="date" id="pf-sell-date"></label>
-      <label>Sell Price<input type="number" id="pf-sell-price" step="0.05" min="0" oninput="updatePfSellPreview('${tradeId}')"></label>
-      <label>Quantity Sold<input type="number" id="pf-sell-qty" step="1" min="1" max="${qtyRem}" value="${qtyRem}" oninput="updatePfSellPreview('${tradeId}')"></label>
-      <label>Brokerage &amp; Other Charges<input type="number" id="pf-sell-charges" step="0.01" min="0" value="0" oninput="updatePfSellPreview('${tradeId}')"></label>
+      <label>Sell Price<input type="number" id="pf-sell-price" step="0.05" min="0" oninput="updatePfSellPreview('${escapeInlineJs(tradeId)}')"></label>
+      <label>Quantity Sold<input type="number" id="pf-sell-qty" step="1" min="1" max="${qtyRem}" value="${qtyRem}" oninput="updatePfSellPreview('${escapeInlineJs(tradeId)}')"></label>
+      <label>Brokerage &amp; Other Charges<input type="number" id="pf-sell-charges" step="0.01" min="0" value="0" oninput="updatePfSellPreview('${escapeInlineJs(tradeId)}')"></label>
     </div>
     <p style="color:var(--muted);font-size:.85rem;margin-top:10px" id="pf-sell-preview">Total Sell Value: \u2014</p>
-    <button class="btn" onclick="submitSellEntry('${tradeId}')">Confirm Sell</button>
+    <button class="btn" onclick="submitSellEntry('${escapeInlineJs(tradeId)}')">Confirm Sell</button>
   `);
 }
 function updatePfSellPreview(tradeId) {
@@ -12144,7 +12232,7 @@ function openEditTradeModal(tradeId) {
       <label>CMP Override (optional \u2014 blank uses auto lookup)<input type="number" id="pf-edit-cmp" step="0.05" value="${t.cmpOverride !== null && t.cmpOverride !== undefined ? t.cmpOverride : ''}"></label>
       <label style="grid-column:1/-1">Notes<input type="text" id="pf-edit-notes" value="${escapeHtml(t.notes || '')}"></label>
     </div>
-    <button class="btn" onclick="submitEditTrade('${tradeId}')">Save Changes</button>
+    <button class="btn" onclick="submitEditTrade('${escapeInlineJs(tradeId)}')">Save Changes</button>
   `);
 }
 async function submitEditTrade(tradeId) {
@@ -12986,6 +13074,95 @@ async function adminDeleteSecurityAudit() {
   }
 }
 
+async function adminCreateUser() {
+  if (!AUTH.isAdmin) { toast('Administrator access required.', true); return; }
+  const button = document.getElementById('btn-admin-create-user');
+  const displayName = document.getElementById('admin-new-user-name')?.value.trim() || '';
+  const email = document.getElementById('admin-new-user-email')?.value.trim().toLowerCase() || '';
+  const password = document.getElementById('admin-new-user-password')?.value || '';
+  if (!email || password.length < 8) { toast('Email and a password of at least 8 characters are required.', true); return; }
+  if (button) { button.disabled = true; button.textContent = 'Creating…'; }
+  try {
+    const { data, error } = await appClient.functions.invoke('nse-admin-user-management', {
+      body: { action: 'create_user', display_name: displayName, email, password, role: 'admin', is_active: false, permissions: { dashboard: false } },
+    });
+    if (error) throw error;
+    if (!data?.ok) throw new Error(data?.error || 'User creation failed.');
+    toast('User created with Dashboard access only.');
+    ['admin-new-user-name','admin-new-user-email','admin-new-user-password'].forEach(id => { const el=document.getElementById(id); if(el) el.value=''; });
+    await renderUserManagementPage();
+  } catch (e) {
+    console.error('Admin user creation failed:', e);
+    let msg=e?.message||'User creation failed.';
+    try { if(e?.context?.body) msg=JSON.parse(e.context.body)?.error||msg; } catch (_) {}
+    toast(msg,true);
+  } finally { if(button){button.disabled=false;button.textContent='Create user';} }
+}
+
+async function adminSetSecurityAnswer(userId) {
+  if (!AUTH.isAdmin) { toast('Administrator access required.', true); return; }
+  const answer = prompt('Set the administrator security answer.\n\nThe answer is hashed server-side and is never returned to the browser after saving.');
+  if (answer === null) return;
+  if (answer.trim().length < 4) { toast('Security answer must be at least 4 characters.', true); return; }
+  try {
+    const { data, error } = await appClient.functions.invoke('nse-admin-user-management', {
+      body: { action: 'set_security_answer', user_id: userId, answer },
+    });
+    if (error) throw error;
+    if (!data?.ok) throw new Error(data?.error || 'Security answer update failed.');
+    toast('Administrator security answer configured.');
+    await renderUserManagementPage();
+  } catch (e) {
+    console.error('Security answer update failed:', e);
+    toast(e?.message || 'Security answer update failed.', true);
+  }
+}
+
+async function adminClearLoginLock(userId) {
+  if (!AUTH.isAdmin) { toast('Administrator access required.', true); return; }
+  try {
+    const { data, error } = await appClient.functions.invoke('nse-admin-user-management', {
+      body: { action: 'clear_login_lock', user_id: userId },
+    });
+    if (error) throw error;
+    if (!data?.ok) throw new Error(data?.error || 'Login security lock could not be cleared.');
+    toast(data.message || 'Login security lock cleared.');
+    await renderUserManagementPage();
+  } catch (e) {
+    console.error('Clear login lock failed:', e);
+    toast(e?.message || 'Could not clear the login security lock.', true);
+  }
+}
+
+async function adminApplyAccountStatus(userId, active) {
+  const { data, error } = await appClient.functions.invoke('nse-admin-user-management', {
+    body: { action: 'set_active', user_id: userId, active: !!active },
+  });
+  if (error) throw error;
+  if (!data?.ok) throw new Error(data?.error || 'Account status update failed.');
+  return data;
+}
+
+function authSecurityEventsHtml(rows) {
+  const list = Array.isArray(rows) ? rows : [];
+  return `<div class="panel"><div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><div><h3>Authentication security events</h3><p style="color:var(--muted);font-size:.78rem">Failed sign-ins, account deactivation, administrator security challenges, user creation, password changes and administrator lock clearing. Passwords and security answers are never logged.</p></div><button id="btn-refresh-auth-security-events" class="btn small" type="button">↻ Refresh</button></div><div class="table-wrap" style="margin-top:10px"><table><thead><tr><th>Time</th><th>Email</th><th>Action</th><th>Result</th><th>Failures</th><th>IP</th></tr></thead><tbody>${list.length ? list.map(r=>`<tr><td>${escapeHtml(r.occurred_at?new Date(r.occurred_at).toLocaleString():'—')}</td><td>${escapeHtml(r.email||r.target_email||'—')}</td><td>${escapeHtml(r.action||'—')}</td><td>${escapeHtml(r.result||'—')}</td><td>${escapeHtml(r.failure_count==null?'—':String(r.failure_count))}</td><td>${escapeHtml(r.ip_address||'—')}</td></tr>`).join('') : `<tr><td colspan="6" style="color:var(--muted)">No authentication security events.</td></tr>`}</tbody></table></div></div>`;
+}
+
+async function adminRefreshAuthSecurityEvents() {
+  if (!AUTH.isAdmin) return;
+  try {
+    const { data, error } = await appClient.rpc('nse_admin_auth_security_events', { p_limit: 200 });
+    if (error) throw error;
+    const holder=document.getElementById('auth-security-events-holder');
+    if(holder) holder.innerHTML=authSecurityEventsHtml(data||[]);
+    document.getElementById('btn-refresh-auth-security-events')?.addEventListener('click',adminRefreshAuthSecurityEvents);
+  } catch(e) {
+    console.error('Authentication security event load failed:',e);
+    const holder=document.getElementById('auth-security-events-holder');
+    if(holder) holder.innerHTML='<div class="panel"><p class="text-bad">Could not load authentication security events.</p></div>';
+  }
+}
+
 async function renderUserManagementPage() {
   const el = document.getElementById('page-user-management');
   if (!AUTH.isAdmin) {
@@ -12994,20 +13171,23 @@ async function renderUserManagementPage() {
   }
   el.innerHTML = '<div class="panel"><p>Loading user management…</p></div>';
   try {
-    const [usersResult, auditResult, settingsResult, sessionResult] = await Promise.all([
+    const [usersResult, auditResult, settingsResult, sessionResult, authSecurityResult] = await Promise.all([
       appClient.rpc('nse_admin_list_users'),
       appClient.rpc('nse_admin_security_attempts', { p_limit: 100, p_user_id: null }),
       loadManagedSecuritySettingsAdmin().then(data => ({ data, error: null })),
       appClient.rpc('nse_admin_session_logs', { p_limit: 200 }),
+      appClient.rpc('nse_admin_auth_security_events', { p_limit: 200 }),
     ]);
     if (usersResult.error) throw usersResult.error;
     if (auditResult.error) throw auditResult.error;
     if (settingsResult.error) throw settingsResult.error;
     if (sessionResult.error) throw sessionResult.error;
+    if (authSecurityResult.error) throw authSecurityResult.error;
     const users = Array.isArray(usersResult.data) ? usersResult.data : [];
     const auditRows = Array.isArray(auditResult.data) ? auditResult.data : [];
     const securitySettings = settingsResult.data || { log_user_sessions: true, admin_idle_timeout_minutes: 5 };
     const sessionRows = Array.isArray(sessionResult.data) ? sessionResult.data : [];
+    const authSecurityRows = Array.isArray(authSecurityResult.data) ? authSecurityResult.data : [];
     const cards = users.map(u => {
       const sid = safeDomId(u.user_id);
       const perms = (u.permissions && typeof u.permissions === 'object') ? u.permissions : {};
@@ -13035,15 +13215,17 @@ async function renderUserManagementPage() {
                 <option value="admin" ${u.role === 'admin' ? 'selected' : ''}>Admin</option>
               </select></label>
               <label style="display:flex;align-items:center;gap:6px"><input type="checkbox" id="um-active-${sid}" ${u.is_active ? 'checked' : ''} ${isSelf ? 'disabled' : ''}> Active</label>
-              <button class="btn small" onclick="adminResetPassword('${escapeHtml(u.user_id)}','${escapeHtml(u.email || '')}')">🔑 Reset password</button>
-              <button class="btn primary small" onclick="adminSaveUserAccess('${escapeHtml(u.user_id)}')">Save access</button>
+              <button class="btn small" onclick="adminResetPassword('${escapeInlineJs(u.user_id)}','${escapeInlineJs(u.email || '')}')">🔑 Reset password</button>
+              ${u.role === 'admin' ? `<button class="btn small" onclick="adminSetSecurityAnswer('${escapeInlineJs(u.user_id)}')">🔐 Set security answer</button>` : ''}
+              <button class="btn small" onclick="adminClearLoginLock('${escapeInlineJs(u.user_id)}')">↺ Clear login lock</button>
+              <button class="btn primary small" onclick="adminSaveUserAccess('${escapeInlineJs(u.user_id)}')">Save access</button>
             </div>
           </div>
           <div style="margin-top:12px">
             <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
               <strong style="font-size:.82rem">Page permissions</strong>
-              <button class="btn small" onclick="adminToggleAllPermissions('${escapeHtml(u.user_id)}', true)">Select all</button>
-              <button class="btn small" onclick="adminToggleAllPermissions('${escapeHtml(u.user_id)}', false)">Clear all</button>
+              <button class="btn small" onclick="adminToggleAllPermissions('${escapeInlineJs(u.user_id)}', true)">Select all</button>
+              <button class="btn small" onclick="adminToggleAllPermissions('${escapeInlineJs(u.user_id)}', false)">Clear all</button>
             </div>
             <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:4px 12px">${checks}</div>
             <p style="color:var(--muted);font-size:.75rem;margin-top:8px">Administrators automatically have access to all pages. “User Management” itself is administrator-only.</p>
@@ -13053,6 +13235,19 @@ async function renderUserManagementPage() {
 
     el.innerHTML = `
       <div class="page-header"><h1>User Management</h1></div>
+      <div class="panel">
+        <h3>Add New User</h3>
+        <p style="color:var(--muted);font-size:.82rem">New users are always created server-side as <strong>User</strong>, active, with <strong>Dashboard only</strong>. Role, account status and permissions submitted by the browser are ignored by the server.</p>
+        <div class="grid grid-2" style="margin-top:10px">
+          <label>Display name<br><input id="admin-new-user-name" type="text" maxlength="160" autocomplete="name"></label>
+          <label>Email<br><input id="admin-new-user-email" type="email" maxlength="320" autocomplete="off"></label>
+          <label>Initial password<br><input id="admin-new-user-password" type="password" maxlength="256" autocomplete="new-password"></label>
+        </div>
+        <div style="margin-top:10px;display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+          <button id="btn-admin-create-user" class="btn primary small" type="button">Create user</button>
+          <span style="color:var(--muted);font-size:.75rem">Initial password: minimum 8 characters. Permissions can be changed later by an administrator.</span>
+        </div>
+      </div>
       <div class="panel">
         <h3>Administrator controls</h3>
         <p style="color:var(--muted);font-size:.82rem">Only administrator accounts can see and change this page. Password changes use the server-side account service.</p>
@@ -13079,10 +13274,13 @@ async function renderUserManagementPage() {
         <button class="btn primary small" style="margin-top:10px" onclick="saveAdminSessionSecuritySettings()">Save login/security settings</button>
       </div>
 
+      <div id="auth-security-events-holder">${authSecurityEventsHtml(authSecurityRows)}</div>
       <div id="security-audit-holder">${securityAuditHtml(auditRows)}</div>
       <div id="session-log-holder">${managedSessionLogsHtml(sessionRows)}</div>
       ${cards || '<div class="panel"><p>No profiles found.</p></div>'}
     `;
+    document.getElementById('btn-admin-create-user')?.addEventListener('click', adminCreateUser);
+    document.getElementById('btn-refresh-auth-security-events')?.addEventListener('click', adminRefreshAuthSecurityEvents);
 
   } catch (e) {
     console.error('User management load failed:', e);
@@ -13109,6 +13307,9 @@ async function adminSaveUserAccess(userId) {
   try {
     const requestedRole = roleEl?.value || null;
     const requestedActive = activeEl ? !!activeEl.checked : null;
+    if (requestedActive !== null) {
+      await adminApplyAccountStatus(userId, requestedActive);
+    }
     const { error } = await appClient.rpc('nse_admin_update_user_access', {
       p_user_id: userId,
       p_role: requestedRole,
@@ -14732,7 +14933,7 @@ async function renderOaOverviewTab(dates) {
           <td>${fmtNum(r.netDirectional,1)}</td>
           <td>${r.profitSetup.requiredMovePct!==null?fmtNum(r.profitSetup.requiredMovePct,1)+'%':'—'}</td>
           <td>${r.profitSetup.riskReward!==null?fmtNum(r.profitSetup.riskReward,2):'—'}</td>
-          <td><a style="cursor:pointer" onclick="oaDrillInto('${escapeHtml(r.symbol)}')">Detail →</a></td>
+          <td><a style="cursor:pointer" onclick="oaDrillInto('${escapeInlineJs(r.symbol)}')">Detail →</a></td>
         </tr>`).join('')}</tbody>
       </table></div>`}
       <p style="font-size:.75rem;color:var(--muted);margin-top:8px">Ranked by confidence score, restricted to setups that already have a sized entry/target/stop-loss. This is a data-driven scan output, not a guarantee any of these reach 10%.</p>
@@ -14746,7 +14947,7 @@ async function renderOaOverviewTab(dates) {
           <td style="color:${oaActionColor(r.action)}">${r.action}</td>
           <td>${fmtNum(r.netDirectional,1)}</td>
           <td style="font-size:.75rem;color:var(--muted)">${escapeHtml((r.actionWhy&&r.actionWhy[0])||'')}</td>
-          <td><a style="cursor:pointer" onclick="oaDrillInto('${escapeHtml(r.symbol)}')">Detail →</a></td>
+          <td><a style="cursor:pointer" onclick="oaDrillInto('${escapeInlineJs(r.symbol)}')">Detail →</a></td>
         </tr>`).join('')}</tbody>
       </table></div>
     </div>`;
@@ -14826,7 +15027,7 @@ function renderOaStockwiseBody() {
           <td>${r.zone ? fmtNum(r.zone.loStrike,0)+'–'+fmtNum(r.zone.hiStrike,0) : '—'}</td>
           <td>${r.profitSetup && r.profitSetup.requiredMovePct!==null ? fmtNum(r.profitSetup.requiredMovePct,1)+'%' : '—'}</td>
           <td>${r.profitSetup && r.profitSetup.riskReward!==null ? fmtNum(r.profitSetup.riskReward,2) : '—'}</td>
-          <td><a style="cursor:pointer" onclick="oaDrillInto('${escapeHtml(r.symbol)}')">Detail ↓</a></td>
+          <td><a style="cursor:pointer" onclick="oaDrillInto('${escapeInlineJs(r.symbol)}')">Detail ↓</a></td>
         </tr>`).join('') : '<tr><td colspan="8" style="color:var(--muted)">No symbols match these filters.</td></tr>'}</tbody>
       </table></div>
     </div>
@@ -15689,8 +15890,8 @@ function renderOa2OverviewTab() {
       <tbody>${rows.map(r => `
         <tr>
 		  <td>${cmpAddButtonHtml(r.symbol)}${oa2PoolAddButtonHtml(r.symbol, 'Same Screen', '—', '—', '—')}</td>
-          <td class="sym" onclick="openOa2DetailFor('${escapeHtml(r.symbol)}', '${r.date}')">${escapeHtml(r.symbol)}
-            <button type="button" class="btn small" title="View this stock's data across all dates" onclick="event.stopPropagation();viewOa2SymbolHistory('${escapeHtml(r.symbol)}')">🔍</button>${rangeActive ? `
+          <td class="sym" onclick="openOa2DetailFor('${escapeInlineJs(r.symbol)}', '${escapeInlineJs(r.date)}')">${escapeHtml(r.symbol)}
+            <button type="button" class="btn small" title="View this stock's data across all dates" onclick="event.stopPropagation();viewOa2SymbolHistory('${escapeInlineJs(r.symbol)}')">🔍</button>${rangeActive ? `
             <button type="button" class="btn small" title="Clear search / date range" onclick="event.stopPropagation();clearOa2OverviewFilters()">✕</button>` : ''}
           </td>
           ${rangeActive ? `<td>${r.date}</td>` : ''}
@@ -15804,7 +16005,7 @@ function renderOa2RecurrencePanel(symbol, cashHistBySymbol, foHistBySymbol) {
   const flagged = allInfo.filter(info => tierFilt[info.tier]);
 
   const tierCheckboxesHtml = OA2_FLAG_TIERS.map(t => `
-    <label style="margin-right:10px"><input type="checkbox" class="oa2-flaghist-tier" data-tier="${escapeHtml(t)}" ${tierFilt[t] ? 'checked' : ''} onchange="oa2SetFlagHistoryTier('${escapeHtml(t)}', this.checked)"> ${oa2TierBadge(t)}</label>`).join('');
+    <label style="margin-right:10px"><input type="checkbox" class="oa2-flaghist-tier" data-tier="${escapeHtml(t)}" ${tierFilt[t] ? 'checked' : ''} onchange="oa2SetFlagHistoryTier('${escapeInlineJs(t)}', this.checked)"> ${oa2TierBadge(t)}</label>`).join('');
 
   if (!flagged.length) {
     return `<div class="panel"><div class="panel-title" style="margin-top:0"><h3>Flag History — ${escapeHtml(symbol)}</h3></div>
@@ -16220,6 +16421,8 @@ document.addEventListener('DOMContentLoaded', async () => {
   document.getElementById('btn-theme-toggle').onclick = toggleTheme;
   document.getElementById('btn-switch-db').onclick = switchSqliteFile;
   document.getElementById('btn-auth-logout').onclick = signOutHosted;
+  document.getElementById('btn-admin-create-user')?.addEventListener('click', adminCreateUser);
+  document.getElementById('btn-refresh-auth-security-events')?.addEventListener('click', adminRefreshAuthSecurityEvents);
   document.getElementById('menu-toggle').onclick = toggleSidebarDrawer;
   document.getElementById('sidebar-backdrop').onclick = closeSidebarDrawer;
   restoreSidebarLayout();
@@ -16243,22 +16446,39 @@ document.addEventListener('DOMContentLoaded', async () => {
   });
   document.getElementById('modal-overlay').onclick = (e) => { if (e.target.id === 'modal-overlay') closeModal(); };
 
+  document.getElementById('btn-auth-security-answer').onclick = verifyAdminSecurityAnswer;
   document.getElementById('auth-form').addEventListener('submit', async (e) => {
     e.preventDefault();
     authSetError('');
+    clearAuthSecurityChallenge();
     const button = document.getElementById('btn-auth-login');
     button.disabled = true;
     button.textContent = 'Signing in…';
     try {
-      const email = document.getElementById('auth-email').value.trim();
+      const email = document.getElementById('auth-email').value.trim().toLowerCase();
       const password = document.getElementById('auth-password').value;
-      const { error } = await appClient.auth.signInWithPassword({ email, password });
-      if (error) throw error;
+      const data = await callPublicSecurityFunction('nse-auth-gateway', { email, password });
+      if (data?.security_challenge_required) {
+        showAuthSecurityChallenge(data.challenge_token);
+        document.getElementById('auth-password').value = '';
+        authSetError('Additional administrator verification is required.');
+        return;
+      }
+      if (!data?.ok || !data?.session?.access_token || !data?.session?.refresh_token) throw new Error(data?.error || 'Sign in failed.');
+      const { error: sessionError } = await appClient.auth.setSession({
+        access_token: data.session.access_token,
+        refresh_token: data.session.refresh_token,
+      });
+      if (sessionError) throw sessionError;
       await loadAuthContext();
       await showHostedAppWithoutLocalDb();
     } catch (err) {
       console.error(err);
-      authSetError(err.message || 'Sign in failed.');
+      if (err?.payload?.security_challenge_required) {
+        showAuthSecurityChallenge(err.payload.challenge_token);
+        document.getElementById('auth-password').value = '';
+      }
+      authSetError(err?.message || 'Invalid email or password.');
     } finally {
       button.disabled = false;
       button.textContent = 'Sign in';
